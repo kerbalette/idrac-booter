@@ -1,5 +1,8 @@
-import argparse, requests, xmltodict, re
+import argparse, requests, xmltodict, re, os
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
+from getpass import getpass
+from configparser import ConfigParser
+from pathlib import Path
 
 def build_header(host):
     header = {'Host':host,
@@ -78,4 +81,50 @@ def main():
 
 
 if __name__ == "__main__":
-   main()
+    configpath = os.path.expanduser('~') + "/.idrac/config.ini"
+    configparser = ConfigParser()
+    
+    if not os.path.exists(configpath):
+        hostname = input('iDrac Host Name: ')
+        username = input('Username: ')
+        password = getpass()
+        proxyhost = input('Proxy host: [Press ENTER for None]: ')
+        proxyport = input('Proxy port: [Press ENTER for None]: ')
+
+        configparser.add_section('default')
+        configparser.set('default','idrac_host', hostname)
+        configparser.set('default','username', username)
+        configparser.set('default','password', password)
+        configparser.set('default','proxyhost', proxyhost)
+        configparser.set('default','proxyport', proxyport)
+  
+        if not os.path.isdir(configpath):
+            posixpath = Path(configpath)
+            os.makedirs(posixpath.parent)
+
+        with open(configpath, 'w+') as configfile:
+            configparser.write(configfile)
+
+    else:
+        configparser.read(configpath)
+        hostname = configparser.get('default', 'idrac_host')
+        username = configparser.get('default', 'username')
+        password = configparser.get('default', 'password')
+        proxyhost = configparser.get('default', 'proxyhost')
+        proxyport = configparser.get('default', 'proxyport')
+    
+    if (proxyhost):
+        proxies = {'http':'http://%s:%s' %(proxyhost, proxyport), 'https':'http://%s:%s' %(proxyhost, proxyport)}
+    else:
+        proxies = {}
+
+    # Disable SSL errors
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+    success, response = authenticate(hostname, proxies, username, password)
+    if success:
+        cookie, token1, token2 = extract_tokens(response)
+        power_on(hostname, proxies, cookie, token1, token2)
+        print(cookie)
+
+   # Refactoring to use configfile main()

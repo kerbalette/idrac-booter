@@ -161,3 +161,8 @@ cython_debug/
 
 #VSCode
 .vscode/
+
+# Ensure Config File Does not get added
+config.inii
+
+.DS_Store
