@@ -1,8 +1,11 @@
 import argparse, requests, xmltodict, re, os
+import keyring
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 from getpass import getpass
 from configparser import ConfigParser
 from pathlib import Path
+
+KEYRING_SERVICE = "idrac-booter"
 
 def build_header(host):
     header = {'Host':host,
@@ -28,62 +31,43 @@ def power_on(host, proxies, cookie, token1, token2):
     header["St2"] = f"{token2}"
 
     url = f'https://{host}{poweron_uri}'
-    response = requests.post(url, headers=header, proxies=proxies, verify=False )
+    response = requests.post(url, headers=header, proxies=proxies, verify=False)
     if response.status_code == 200:
         return True, response
     else:
         return False, None
-             
+
 def authenticate(host, proxies, username, password):
     login_uri = '/data/login'
     header = build_header(host)
-    
+
     url = f'https://{host}{login_uri}'
     data = {'user': username, 'password': password}
-    response = requests.post(url, data=data, headers=header, proxies=proxies, verify=False )
-    if (response.status_code == 200):
+    response = requests.post(url, data=data, headers=header, proxies=proxies, verify=False)
+    if response.status_code == 200:
         return True, response
     else:
         return False, None
 
 def extract_tokens(response):
-    cookie = response.headers['Set-Cookie']
-    dict_data = xmltodict.parse(response.content)
-    forwardUrl = dict_data['root']['forwardUrl']
-    token_extract = re.search('ST1\=(.*)\,ST2\=(.*)', forwardUrl)
-    token1 = token_extract.group(1)
-    token2 = token_extract.group(2)
-    return cookie, token1, token2
+    try:
+        cookie = response.headers['Set-Cookie']
+        dict_data = xmltodict.parse(response.content)
+        forwardUrl = dict_data['root']['forwardUrl']
+        token_extract = re.search(r'ST1=(.*),ST2=(.*)', forwardUrl)
+        if not token_extract:
+            raise ValueError("Could not extract ST1/ST2 tokens from forwardUrl")
+        token1 = token_extract.group(1)
+        token2 = token_extract.group(2)
+        return cookie, token1, token2
+    except (KeyError, TypeError) as e:
+        raise RuntimeError(f"Failed to parse login response: {e}")
 
 
-def main():
-    parser = argparse.ArgumentParser(description="Integrated Dell Remote Access Controller ('iDrac') Booter")
-    parser.add_argument('--host', help='Enter Host name to boot', required=True)
-    parser.add_argument('--username', help='Username to authenticate', required=True)
-    parser.add_argument('--password', help='Password for authentication', required=True)
-    parser.add_argument('--proxyhost', help='Proxy Server',required=False)
-    parser.add_argument('--proxyport', help='Proxy Port', required=False, default="8080")
-    args = parser.parse_args()
-
-    # Disable SSL errors
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
-    if (args.proxyhost):
-        proxies = {'http':'http://%s:%s' %(args.proxyhost, args.proxyport), 'https':'http://%s:%s' %(args.proxyhost, args.proxyport)}
-    else:
-        proxies = {}
-    
-    success, response = authenticate(args.host, proxies, args.username, args.password)
-    if success:
-        cookie, token1, token2 = extract_tokens(response)
-        power_on(args.host, proxies, cookie, token1, token2)
-        print(cookie)
-
-
-if __name__ == "__main__":
+def get_config():
     configpath = os.path.expanduser('~') + "/.idrac/config.ini"
     configparser = ConfigParser()
-    
+
     if not os.path.exists(configpath):
         hostname = input('iDrac Host Name: ')
         username = input('Username: ')
@@ -92,39 +76,59 @@ if __name__ == "__main__":
         proxyport = input('Proxy port: [Press ENTER for None]: ')
 
         configparser.add_section('default')
-        configparser.set('default','idrac_host', hostname)
-        configparser.set('default','username', username)
-        configparser.set('default','password', password)
-        configparser.set('default','proxyhost', proxyhost)
-        configparser.set('default','proxyport', proxyport)
-  
-        if not os.path.isdir(configpath):
-            posixpath = Path(configpath)
-            os.makedirs(posixpath.parent)
+        configparser.set('default', 'idrac_host', hostname)
+        configparser.set('default', 'username', username)
+        configparser.set('default', 'proxyhost', proxyhost)
+        configparser.set('default', 'proxyport', proxyport)
+
+        posixpath = Path(configpath)
+        os.makedirs(posixpath.parent, exist_ok=True)
 
         with open(configpath, 'w+') as configfile:
             configparser.write(configfile)
 
+        keyring.set_password(KEYRING_SERVICE, username, password)
     else:
         configparser.read(configpath)
         hostname = configparser.get('default', 'idrac_host')
         username = configparser.get('default', 'username')
-        password = configparser.get('default', 'password')
         proxyhost = configparser.get('default', 'proxyhost')
         proxyport = configparser.get('default', 'proxyport')
-    
-    if (proxyhost):
-        proxies = {'http':'http://%s:%s' %(proxyhost, proxyport), 'https':'http://%s:%s' %(proxyhost, proxyport)}
+        password = keyring.get_password(KEYRING_SERVICE, username)
+        if password is None:
+            password = getpass(f"Password for {username} (will be saved to keyring): ")
+            keyring.set_password(KEYRING_SERVICE, username, password)
+
+    return hostname, username, password, proxyhost, proxyport
+
+
+def main():
+    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+
+    hostname, username, password, proxyhost, proxyport = get_config()
+
+    if proxyhost:
+        proxies = {'http': 'http://%s:%s' % (proxyhost, proxyport), 'https': 'http://%s:%s' % (proxyhost, proxyport)}
     else:
         proxies = {}
 
-    # Disable SSL errors
-    requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
-
     success, response = authenticate(hostname, proxies, username, password)
-    if success:
-        cookie, token1, token2 = extract_tokens(response)
-        power_on(hostname, proxies, cookie, token1, token2)
-        print(cookie)
+    if not success:
+        print("Authentication failed.")
+        return
 
-   # Refactoring to use configfile main()
+    try:
+        cookie, token1, token2 = extract_tokens(response)
+    except RuntimeError as e:
+        print(f"Error extracting session tokens: {e}")
+        return
+
+    success, _ = power_on(hostname, proxies, cookie, token1, token2)
+    if success:
+        print(f"Power-on command sent successfully to {hostname}.")
+    else:
+        print(f"Failed to send power-on command to {hostname}.")
+
+
+if __name__ == "__main__":
+    main()

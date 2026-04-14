@@ -8,6 +8,7 @@ requests = "*"
 argpass = "*"
 xmltodict = "*"
 configparser = "*"
+keyring = "*"
 
 [dev-packages]
 
